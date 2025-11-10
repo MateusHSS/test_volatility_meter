@@ -21,7 +21,7 @@ O script depende de uma biblioteca Python chamada ``pydriller``. Você pode inst
 2. Execute o seguinte comando para instalar o ``pydriller``:
     
 ```bash
-    pip install pydriller
+pip install pydriller
 ```
 
 ## Como Usar
