@@ -1,6 +1,10 @@
 import csv
 import sys
 import os
+import shutil
+import gc
+import stat
+from multiprocessing import Pool, cpu_count
 
 from pydriller import Repository, ModificationType
 
@@ -8,26 +12,80 @@ clone_dir = './temp_repos'
 
 all_repo_results = []
 
-def get_repository(path):
+def get_repository(path, language) -> Repository:
     print('Getting repository from ' + path)
 
     if not os.path.exists(clone_dir):
         os.makedirs(clone_dir)
 
-    return Repository(path.strip(), order='chronological', only_no_merge=True, only_modifications_with_file_types=['.py'], clone_repo_to=clone_dir)
+    file_type = ''
+    if language == 'py':
+        file_type = '.py'
+    elif language == 'ts':
+        file_type = '.ts'
+    elif language == 'js':
+        file_type = '.js'
+
+    return Repository(path.strip(), order='chronological', only_no_merge=True, only_modifications_with_file_types=[file_type], clone_repo_to=clone_dir)
+
+def get_repo_name_from_url(url) -> str:
+    last_slash_index = url.rfind('/')
+    len_url = len(url)
+
+    if last_slash_index < 0 or last_slash_index >= len_url - 1:
+        print('URL mal formada')
+        sys.exit(1)
+
+    last_dot_index = url.rfind(".")
+
+    if url[last_dot_index:] == ".git":
+        last_suffix_index = last_dot_index
+    else:
+        last_suffix_index = len_url
+
+    return url[last_slash_index + 1:last_suffix_index]
+
+def remove_readonly(func, path, exc_info):
+    if isinstance(exc_info[1], PermissionError):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception as e:
+            raise exc_info[1]
+    else:
+        raise exc_info[1]
 
 def process_repo(url, language):
     print('Processing ' + url)
-    repo = get_repository(url)
+    repo = None
+    try:
+        repo = get_repository(url, language)
+        repo_name = get_repo_name_from_url(url)
 
-    return {'repo': url, 'modifications': process_commits(repo, language)}
+        write_to_csv(repo_name, process_commits(repo, language))
+    except Exception as e:
+        print(f"!!!Falha ao processar {url}: {e}")
+        return None
+    finally:
+        print("Iniciando limpeza...")
+        if repo is not None:
+            del repo
+            gc.collect()
+
+        repo_temp_path = os.path.join(clone_dir, get_repo_name_from_url(url))
+        if os.path.exists(repo_temp_path):
+            shutil.rmtree(repo_temp_path, onerror=remove_readonly)
+
+            print(f"Diretório {repo_temp_path} deletado com sucesso.")
+        else:
+            print(f"Diretório {repo_temp_path} não encontrado, nada a limpar.")
+
 
 def process_commits(repo, language):
     print('Processing commits')
     modifications = {}
     for commit in repo.traverse_commits():
         for file in commit.modified_files:
-
             old_path = file.old_path
             new_path = file.new_path
 
@@ -95,23 +153,24 @@ def is_test_file(file, language):
     else:
         return False
 
-def write_to_csv(results):
-    print('Writing to csv')
-    fieldnames = ['repo_url', 'file', 'modifications']
-    if not results:
+def write_to_csv(repo_name, result, output_dir='results'):
+    fieldnames = ['file', 'modifications']
+    if not result:
         return
 
-    with open('result.csv', 'w', newline='', encoding='utf-8') as csvfile:
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    result_filename = f'{repo_name}.csv'
+    result_file_path = os.path.join(output_dir, result_filename)
+
+    with open(result_file_path, 'w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 
         writer.writeheader()
 
-        for result in results:
-            repo_url = result['repo']
-            modifications = result['modifications']
-
-            for filepath, modifications_num in modifications.items():
-                writer.writerow({'repo_url': repo_url, 'file': filepath, 'modifications': modifications_num})
+        for filepath, modifications_num in result.items():
+            writer.writerow({'file': filepath, 'modifications': modifications_num})
 
     return
 
@@ -128,17 +187,17 @@ def main():
         sys.exit(1)
 
     try:
+        repo_tasks = []
         with open(file_path, 'r') as file:
             for repo_url in file:
-                try:
-                    result = process_repo(repo_url, language)
+                repo_tasks.append((repo_url.strip(), language))
 
-                    if result:
-                        all_repo_results.append(result)
-                except Exception as e:
-                    print(f"!!! Falha ao processar {repo_url}: {e}")
+        num_workers = max(1, cpu_count() - 1)
+        print(f"Iniciando Pool de Processos com {num_workers} workers")
 
-        write_to_csv(all_repo_results)
+        with Pool(num_workers) as p:
+            p.starmap(process_repo, repo_tasks)
+
     except FileNotFoundError:
         print(f"Erro: Arquivo {file_path} não encontrado")
         sys.exit(1)
